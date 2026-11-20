@@ -855,6 +855,73 @@ def adicionar_forca_relativa(saida):
             dados["priority_score"] = scores["best_setup_score"]
 
 
+def aplicar_scores_multiframe(saida):
+    # Combina contexto diário com o timeframe de entrada sem exigir concordância perfeita.
+    mapping = {
+        "cryptos": ("4h", 0.70),
+        "stocks": ("1h", 0.55),
+        "etfs": ("1h", 0.55),
+    }
+    score_keys = [
+        ("long_score", "long"),
+        ("short_score", "short"),
+        ("reversal_long_score", "reversal_long"),
+        ("reversal_short_score", "reversal_short"),
+    ]
+
+    for classe, (intraday_key, weight) in mapping.items():
+        for dados in saida.get(classe, {}).values():
+            daily = setup_scores(dados.get("1d"))
+            intra = setup_scores(dados.get(intraday_key)) if dados.get(intraday_key) else None
+
+            dados["daily_scores"] = {
+                "long": daily["long_score"],
+                "short": daily["short_score"],
+                "reversal_long": daily["reversal_long_score"],
+                "reversal_short": daily["reversal_short_score"],
+                "best_setup": daily["best_setup"],
+                "best_setup_score": daily["best_setup_score"],
+            }
+
+            if intra:
+                dados["intraday_scores"] = {
+                    "timeframe": intraday_key,
+                    "long": intra["long_score"],
+                    "short": intra["short_score"],
+                    "reversal_long": intra["reversal_long_score"],
+                    "reversal_short": intra["reversal_short_score"],
+                    "best_setup": intra["best_setup"],
+                    "best_setup_score": intra["best_setup_score"],
+                }
+                combined = {}
+                for field, label in score_keys:
+                    combined[label] = round(
+                        daily[field] + weight * intra[field], 3
+                    )
+                best = max(combined, key=combined.get)
+                dados["long_score"] = combined["long"]
+                dados["short_score"] = combined["short"]
+                dados["reversal_long_score"] = combined["reversal_long"]
+                dados["reversal_short_score"] = combined["reversal_short"]
+                dados["best_setup"] = best
+                dados["best_setup_score"] = combined[best]
+                dados["priority_score"] = combined[best]
+                dados["timeframe_alignment"] = (
+                    "aligned"
+                    if daily["best_setup"] == intra["best_setup"]
+                    else "mixed"
+                )
+                dados["daily_best_setup"] = daily["best_setup"]
+                dados["intraday_best_setup"] = intra["best_setup"]
+            else:
+                dados["intraday_scores"] = None
+                dados["timeframe_alignment"] = "daily_only"
+                dados["daily_best_setup"] = daily["best_setup"]
+                dados["intraday_best_setup"] = None
+                dados.update(daily)
+                dados["priority_score"] = daily["best_setup_score"]
+
+
 def main():
     generated_at = datetime.now(timezone.utc).isoformat()
     stock_specs, stocks_catalog_ok, stock_catalog_count = selecionar_acoes()
@@ -875,7 +942,7 @@ def main():
             "stock_intraday_target": min(MAX_STOCK_INTRADAY, len(stock_specs)),
             "etf_intraday_target": min(MAX_ETF_INTRADAY, len(etf_specs)),
             "stock_intraday_method": "1h fechado do Yahoo Finance; 4h artificial removido",
-            "score_model_version": "2.0-directional",
+            "score_model_version": "2.1-directional-multiframe",
             "indicator_set_version": "3.1",
             "additional_indicators": [
                 "SMA50", "SMA200", "ADX14", "+DI14", "-DI14",
@@ -905,6 +972,7 @@ def main():
     saida["stocks"] = stocks
     saida["etfs"] = etfs
     adicionar_forca_relativa(saida)
+    aplicar_scores_multiframe(saida)
     saida["errors"].update(stock_errors)
     saida["errors"].update({f"ETF:{k}": v for k, v in etf_errors.items()})
 
