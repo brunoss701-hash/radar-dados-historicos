@@ -8,6 +8,7 @@ on:
       - main
     paths:
       - "collector.py"
+      - ".github/workflows/coletor.yml"
 
   schedule:
     - cron: "17 * * * *"
