@@ -81,6 +81,8 @@ def indicadores(df):
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
     df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+    df["sma50"] = df["close"].rolling(50).mean()
+    df["sma200"] = df["close"].rolling(200).mean()
 
     delta = df["close"].diff()
     ganho = delta.clip(lower=0)
@@ -105,6 +107,51 @@ def indicadores(df):
         (df["low"] - anterior).abs(),
     ], axis=1).max(axis=1)
     df["atr14"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
+
+    # ADX / DMI (Wilder): força e direção da tendência.
+    up_move = df["high"].diff()
+    down_move = -df["low"].diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    atr_wilder = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    plus_dm_sm = plus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+    minus_dm_sm = minus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+    df["plus_di14"] = 100 * plus_dm_sm / atr_wilder.replace(0, float("nan"))
+    df["minus_di14"] = 100 * minus_dm_sm / atr_wilder.replace(0, float("nan"))
+    dx = 100 * (df["plus_di14"] - df["minus_di14"]).abs() / (
+        df["plus_di14"] + df["minus_di14"]
+    ).replace(0, float("nan"))
+    df["adx14"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
+
+    # Bandas de Bollinger 20,2: posição do preço e compressão/expansão.
+    bb_mid = df["close"].rolling(20).mean()
+    bb_std = df["close"].rolling(20).std(ddof=0)
+    df["bb_mid20"] = bb_mid
+    df["bb_upper20"] = bb_mid + 2 * bb_std
+    df["bb_lower20"] = bb_mid - 2 * bb_std
+    df["bb_width_pct"] = (
+        (df["bb_upper20"] - df["bb_lower20"]) / bb_mid.replace(0, float("nan"))
+    ) * 100
+    df["bb_percent_b"] = (
+        (df["close"] - df["bb_lower20"]) /
+        (df["bb_upper20"] - df["bb_lower20"]).replace(0, float("nan"))
+    )
+
+    # Chaikin Money Flow 20: pressão de acumulação/distribuição normalizada.
+    hl_range = (df["high"] - df["low"]).replace(0, float("nan"))
+    money_flow_multiplier = (
+        (2 * df["close"] - df["low"] - df["high"]) / hl_range
+    ).fillna(0.0)
+    money_flow_volume = money_flow_multiplier * df["volume"]
+    df["cmf20"] = (
+        money_flow_volume.rolling(20).sum() /
+        df["volume"].rolling(20).sum().replace(0, float("nan"))
+    )
+
+    # Donchian: níveis anteriores para detectar rompimento sem usar a própria vela.
+    df["donchian_high20_prev"] = df["high"].shift(1).rolling(20).max()
+    df["donchian_low20_prev"] = df["low"].shift(1).rolling(20).min()
+
     df["volume_media20"] = df["volume"].rolling(20).mean()
     df["volume_ratio"] = df["volume"] / df["volume_media20"]
     return df
@@ -139,12 +186,25 @@ def snapshot(df):
         "ema20": safe_float(last.get("ema20")),
         "ema50": safe_float(last.get("ema50")),
         "ema200": safe_float(last.get("ema200")),
+        "sma50": safe_float(last.get("sma50")),
+        "sma200": safe_float(last.get("sma200")),
         "rsi14": safe_float(last.get("rsi14")),
         "macd": safe_float(last.get("macd")),
         "macd_signal": safe_float(last.get("macd_signal")),
         "macd_hist": safe_float(last.get("macd_hist")),
         "atr14": atr,
         "atr_pct": round((atr / close) * 100, 4) if atr and close else None,
+        "adx14": safe_float(last.get("adx14")),
+        "plus_di14": safe_float(last.get("plus_di14")),
+        "minus_di14": safe_float(last.get("minus_di14")),
+        "bb_mid20": safe_float(last.get("bb_mid20")),
+        "bb_upper20": safe_float(last.get("bb_upper20")),
+        "bb_lower20": safe_float(last.get("bb_lower20")),
+        "bb_width_pct": safe_float(last.get("bb_width_pct")),
+        "bb_percent_b": safe_float(last.get("bb_percent_b")),
+        "cmf20": safe_float(last.get("cmf20")),
+        "donchian_high20_prev": safe_float(last.get("donchian_high20_prev")),
+        "donchian_low20_prev": safe_float(last.get("donchian_low20_prev")),
         "volume_ratio": safe_float(last.get("volume_ratio")),
         "change_1bar_pct": pct_change(1),
         "change_5bar_pct": pct_change(5),
@@ -154,6 +214,15 @@ def snapshot(df):
     }
     out["distance_high20_pct"] = round((close / high20 - 1) * 100, 4) if close and high20 else None
     out["distance_low20_pct"] = round((close / low20 - 1) * 100, 4) if close and low20 else None
+
+    don_high = out.get("donchian_high20_prev")
+    don_low = out.get("donchian_low20_prev")
+    if close is not None and don_high is not None and close > don_high:
+        out["donchian_breakout20"] = "up"
+    elif close is not None and don_low is not None and close < don_low:
+        out["donchian_breakout20"] = "down"
+    else:
+        out["donchian_breakout20"] = "none"
     return out
 
 
@@ -188,6 +257,11 @@ def prioridade(diario):
     dh = diario.get("distance_high20_pct")
     dl = diario.get("distance_low20_pct")
     atrp = diario.get("atr_pct")
+    adx = diario.get("adx14")
+    cmf = diario.get("cmf20")
+    breakout = diario.get("donchian_breakout20")
+    bb_width = diario.get("bb_width_pct")
+    rel20 = diario.get("relative_strength_20bar_pct")
 
     if all(v is not None for v in [close, e20, e50]):
         if close > e20 > e50 or close < e20 < e50:
@@ -216,6 +290,19 @@ def prioridade(diario):
         score += 1.0
     if atrp is not None and 1.0 <= atrp <= 8.0:
         score += 0.5
+    if adx is not None:
+        if adx >= 25:
+            score += 1.0
+        elif adx >= 20:
+            score += 0.4
+    if cmf is not None and abs(cmf) >= 0.10:
+        score += 0.6
+    if breakout in {"up", "down"}:
+        score += 1.25
+    if bb_width is not None and bb_width >= 8:
+        score += 0.25
+    if rel20 is not None:
+        score += min(abs(rel20) / 5.0, 1.0)
     return round(score, 3)
 
 
@@ -569,6 +656,56 @@ def processar_specs(specs, intraday_limit):
     return dados, erros
 
 
+def adicionar_forca_relativa(saida):
+    # Compara 20 barras contra um benchmark da mesma classe/mercado.
+    benchmarks = {
+        "cryptos": ("BTCUSDT", saida.get("cryptos", {})),
+        "stocks_us": ("SPY", saida.get("etfs", {})),
+        "stocks_b3": ("BOVA11", saida.get("etfs", {})),
+        "etfs": ("SPY", saida.get("etfs", {})),
+    }
+
+    def aplicar(grupo, benchmark_data):
+        if not benchmark_data or not benchmark_data.get("1d"):
+            return
+        bench20 = benchmark_data["1d"].get("change_20bar_pct")
+        bench5 = benchmark_data["1d"].get("change_5bar_pct")
+        if bench20 is None:
+            return
+        for dados in grupo.values():
+            diario = dados.get("1d")
+            if not diario:
+                continue
+            ch20 = diario.get("change_20bar_pct")
+            ch5 = diario.get("change_5bar_pct")
+            diario["relative_strength_20bar_pct"] = (
+                round(ch20 - bench20, 4) if ch20 is not None else None
+            )
+            diario["relative_strength_5bar_pct"] = (
+                round(ch5 - bench5, 4)
+                if ch5 is not None and bench5 is not None else None
+            )
+
+    aplicar(saida.get("cryptos", {}), saida.get("cryptos", {}).get("BTCUSDT"))
+
+    us_stocks = {
+        k: v for k, v in saida.get("stocks", {}).items()
+        if v.get("exchange") in {"NASDAQ", "NYSE", "US"}
+    }
+    b3_stocks = {
+        k: v for k, v in saida.get("stocks", {}).items()
+        if v.get("exchange") == "B3"
+    }
+    aplicar(us_stocks, saida.get("etfs", {}).get("SPY"))
+    aplicar(b3_stocks, saida.get("etfs", {}).get("BOVA11"))
+    aplicar(saida.get("etfs", {}), saida.get("etfs", {}).get("SPY"))
+
+    # Recalcula a prioridade depois de incluir força relativa.
+    for classe in ["cryptos", "stocks", "etfs"]:
+        for dados in saida.get(classe, {}).values():
+            dados["priority_score"] = prioridade(dados.get("1d"))
+
+
 def main():
     generated_at = datetime.now(timezone.utc).isoformat()
     stock_specs, stocks_catalog_ok, stock_catalog_count = selecionar_acoes()
@@ -589,6 +726,12 @@ def main():
             "stock_intraday_target": min(MAX_STOCK_INTRADAY, len(stock_specs)),
             "etf_intraday_target": min(MAX_ETF_INTRADAY, len(etf_specs)),
             "stock_intraday_method": "4h aproximado agregado de barras Yahoo 1h por sessão",
+            "indicator_set_version": "3.0",
+            "additional_indicators": [
+                "SMA50", "SMA200", "ADX14", "+DI14", "-DI14",
+                "Bollinger20x2", "CMF20", "Donchian20",
+                "relative_strength_5bar", "relative_strength_20bar"
+            ],
         },
         "cryptos": {}, "stocks": {}, "etfs": {}, "errors": {},
     }
@@ -609,6 +752,7 @@ def main():
     etfs, etf_errors = processar_specs(etf_specs, MAX_ETF_INTRADAY)
     saida["stocks"] = stocks
     saida["etfs"] = etfs
+    adicionar_forca_relativa(saida)
     saida["errors"].update(stock_errors)
     saida["errors"].update({f"ETF:{k}": v for k, v in etf_errors.items()})
 
