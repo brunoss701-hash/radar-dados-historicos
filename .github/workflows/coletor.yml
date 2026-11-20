@@ -11,7 +11,14 @@ on:
       - ".github/workflows/coletor.yml"
 
   schedule:
+    # Coleta horária normal.
     - cron: "17 * * * *"
+    # Coletas extras ~10 min antes do radar das 7h, 8h, 12h e 18h (America/Bahia = UTC-3).
+    - cron: "50 9,10,14,20 * * *"
+
+concurrency:
+  group: radar-dados-historicos
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -19,6 +26,7 @@ permissions:
 jobs:
   coletar:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Baixar repositorio
@@ -48,5 +56,6 @@ jobs:
             echo "Nenhuma alteracao."
           else
             git commit -m "Atualiza dados do radar"
+            git pull --rebase origin main
             git push
           fi
