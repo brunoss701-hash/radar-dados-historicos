@@ -3,6 +3,12 @@ name: Atualizar dados do Radar
 on:
   workflow_dispatch:
 
+  push:
+    branches:
+      - main
+    paths:
+      - "collector.py"
+
   schedule:
     - cron: "17 * * * *"
 
