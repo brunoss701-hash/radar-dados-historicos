@@ -342,16 +342,31 @@ def setup_scores(diario):
     if hist is not None:
         long_score += 0.8 if hist > 0 else 0.0
         short_score += 0.8 if hist < 0 else 0.0
+    rev_long_context = (
+        (rsi is not None and rsi <= 40)
+        or (bb_b is not None and bb_b <= 0.20)
+        or (dl is not None and dl <= 3.0)
+    )
+    rev_short_context = (
+        (rsi is not None and rsi >= 60)
+        or (bb_b is not None and bb_b >= 0.80)
+        or (dh is not None and dh >= -3.0)
+    )
+
     if hist_d is not None:
         if hist_d > 0:
             long_score += 0.25
-            rev_long += 0.7
+            if rev_long_context:
+                rev_long += 0.7
         elif hist_d < 0:
             short_score += 0.25
-            rev_short += 0.7
+            if rev_short_context:
+                rev_short += 0.7
     if rsi_d is not None:
-        rev_long += 0.4 if rsi_d > 0 else 0.0
-        rev_short += 0.4 if rsi_d < 0 else 0.0
+        if rev_long_context and rsi_d > 0:
+            rev_long += 0.4
+        if rev_short_context and rsi_d < 0:
+            rev_short += 0.4
 
     # Força de tendência e pressão compradora/vendedora.
     if adx is not None and adx >= 25 and plus_di is not None and minus_di is not None:
@@ -363,15 +378,19 @@ def setup_scores(diario):
         long_score += 0.8 if cmf > 0.05 else 0.0
         short_score += 0.8 if cmf < -0.05 else 0.0
     if cmf_d is not None:
-        rev_long += 0.35 if cmf_d > 0 else 0.0
-        rev_short += 0.35 if cmf_d < 0 else 0.0
+        if rev_long_context and cmf_d > 0:
+            rev_long += 0.35
+        if rev_short_context and cmf_d < 0:
+            rev_short += 0.35
 
     # Participação, rompimento e força relativa.
     if vr is not None and vr >= 1.2:
         long_score += 0.45
         short_score += 0.45
-        rev_long += 0.25
-        rev_short += 0.25
+        if rev_long_context:
+            rev_long += 0.25
+        if rev_short_context:
+            rev_short += 0.25
     if breakout == "up":
         long_score += 1.5
     elif breakout == "down":
@@ -598,40 +617,86 @@ def batch_yahoo(tickers, period, interval):
     return saida
 
 
-def remover_vela_incompleta_acoes(df, interval):
+def remover_vela_incompleta_acoes(df, interval, exchange=None):
     if df is None or df.empty:
         return df
     out = df.copy()
     now_utc = pd.Timestamp.now(tz="UTC")
+
+    if exchange == "B3":
+        market_tz = ZoneInfo("America/Sao_Paulo")
+        close_hour, close_minute = 17, 0
+    else:
+        market_tz = ZoneInfo("America/New_York")
+        close_hour, close_minute = 16, 0
+
+    now_market = datetime.now(market_tz)
+    market_close_reached = (
+        (now_market.hour, now_market.minute) >= (close_hour, close_minute)
+    )
+
     if interval == "1h":
         idx = out.index
         if idx.tz is None:
-            idx = idx.tz_localize("UTC")
-        last = idx[-1].tz_convert("UTC")
-        if last + pd.Timedelta(hours=1) > now_utc:
+            idx_utc = idx.tz_localize("UTC")
+        else:
+            idx_utc = idx.tz_convert("UTC")
+        last_utc = idx_utc[-1]
+        last_market = last_utc.tz_convert(market_tz)
+
+        # Yahoo usa uma barra final parcial de 15:30–16:00 nos EUA.
+        # Depois do fechamento ela já é válida mesmo sem completar 60 minutos.
+        final_us_bar_closed = (
+            exchange in {"NASDAQ", "NYSE", "US", None}
+            and market_close_reached
+            and last_market.date() == now_market.date()
+            and (last_market.hour, last_market.minute) >= (15, 30)
+        )
+        if not final_us_bar_closed and last_utc + pd.Timedelta(hours=1) > now_utc:
             out = out.iloc[:-1]
+
     elif interval == "1d":
-        now_ny = datetime.now(ZoneInfo("America/New_York"))
-        if now_ny.weekday() < 5 and now_ny.hour < 16:
+        if now_market.weekday() < 5 and not market_close_reached:
             try:
-                if pd.Timestamp(out.index[-1]).date() == now_ny.date():
+                if pd.Timestamp(out.index[-1]).date() == now_market.date():
                     out = out.iloc[:-1]
             except Exception:
                 pass
     return out
 
 
+def remover_vela_incompleta_crypto(df, interval):
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    idx = out.index
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    else:
+        idx = idx.tz_convert("UTC")
+    last = idx[-1]
+    now_utc = pd.Timestamp.now(tz="UTC")
+    delta = pd.Timedelta(days=1) if interval == "1d" else pd.Timedelta(hours=1)
+    if last + delta > now_utc:
+        out = out.iloc[:-1]
+    return out
+
+
 def agregar_4h_continuo(df):
-    # Para cripto 24/7: agrega quatro barras de 1h sem usar lógica de sessão de bolsa.
+    # Para cripto 24/7: só aceita blocos completos de quatro barras de 1h.
     if df is None or df.empty:
         return pd.DataFrame()
-    out = df.sort_index().resample("4h", origin="start_day").agg({
+    base = df.sort_index()
+    grouped = base.resample("4h", origin="start_day")
+    out = grouped.agg({
         "open": "first",
         "high": "max",
         "low": "min",
         "close": "last",
         "volume": "sum",
     })
+    counts = grouped["close"].count()
+    out = out[counts == 4]
     return out.dropna(subset=["open", "high", "low", "close"])
 
 
@@ -679,11 +744,11 @@ def yahoo_crypto(symbol, interval):
         raw = yf.download(
             ticker, period="2y", interval="1d", progress=False, auto_adjust=False
         )
-        return remover_vela_incompleta_acoes(normalizar_yahoo(raw), "1d")
+        return remover_vela_incompleta_crypto(normalizar_yahoo(raw), "1d")
     raw = yf.download(
         ticker, period="60d", interval="1h", progress=False, auto_adjust=False
     )
-    h1 = remover_vela_incompleta_acoes(normalizar_yahoo(raw), "1h")
+    h1 = remover_vela_incompleta_crypto(normalizar_yahoo(raw), "1h")
     return agregar_4h_continuo(h1)
 
 
@@ -726,7 +791,9 @@ def processar_specs(specs, intraday_limit):
     dados, erros = {}, {}
 
     for yticker, spec in yahoo_to_spec.items():
-        df = remover_vela_incompleta_acoes(diarios.get(yticker), "1d")
+        df = remover_vela_incompleta_acoes(
+            diarios.get(yticker), "1d", spec.get("exchange")
+        )
         snap = snapshot(df)
         if not snap:
             erros[spec["ticker"]] = "Yahoo Finance sem série diária válida."
@@ -791,7 +858,9 @@ def processar_specs(specs, intraday_limit):
         key = spec["ticker"]
         if key not in dados:
             continue
-        h1 = remover_vela_incompleta_acoes(horas.get(yticker), "1h")
+        h1 = remover_vela_incompleta_acoes(
+            horas.get(yticker), "1h", spec.get("exchange")
+        )
         snap1 = snapshot(h1)
         if snap1:
             dados[key]["1h"] = snap1
@@ -922,6 +991,83 @@ def aplicar_scores_multiframe(saida):
                 dados["priority_score"] = daily["best_setup_score"]
 
 
+def construir_radar_compacto(saida):
+    # Arquivo pequeno para a automação: o coletor já fez a triagem do universo inteiro.
+    keep = [
+        "time", "close", "rsi14", "adx14", "plus_di14", "minus_di14",
+        "cmf20", "volume_ratio", "atr_pct", "macd_hist",
+        "macd_hist_delta1", "donchian_breakout20",
+        "relative_strength_20bar_pct", "bb_percent_b",
+        "change_5bar_pct", "change_20bar_pct",
+    ]
+
+    def mini_snap(snap):
+        if not snap:
+            return None
+        return {k: snap.get(k) for k in keep if k in snap}
+
+    assets = []
+    for classe in ["cryptos", "stocks", "etfs"]:
+        for ticker, dados in saida.get(classe, {}).items():
+            intraday_key = "4h" if classe == "cryptos" else "1h"
+            assets.append({
+                "ticker": ticker,
+                "class": classe,
+                "exchange": dados.get("exchange"),
+                "verified": dados.get("quantfury_verified"),
+                "source": dados.get("source"),
+                "best_setup": dados.get("best_setup"),
+                "best_setup_score": dados.get("best_setup_score"),
+                "long_score": dados.get("long_score"),
+                "short_score": dados.get("short_score"),
+                "reversal_long_score": dados.get("reversal_long_score"),
+                "reversal_short_score": dados.get("reversal_short_score"),
+                "alignment": dados.get("timeframe_alignment"),
+                "daily_best": dados.get("daily_best_setup"),
+                "intraday_best": dados.get("intraday_best_setup"),
+                "intraday_tf": intraday_key if dados.get(intraday_key) else None,
+                "d1": mini_snap(dados.get("1d")),
+                "intraday": mini_snap(dados.get(intraday_key)),
+            })
+
+    score_fields = {
+        "long": "long_score",
+        "short": "short_score",
+        "reversal_long": "reversal_long_score",
+        "reversal_short": "reversal_short_score",
+    }
+    candidates = {}
+    for label, field in score_fields.items():
+        ranked = sorted(
+            [a for a in assets if a.get("verified") and isinstance(a.get(field), (int, float))],
+            key=lambda a: a.get(field, -999),
+            reverse=True,
+        )
+        candidates[label] = ranked[:30]
+
+    top_overall = sorted(
+        [a for a in assets if a.get("verified")],
+        key=lambda a: a.get("best_setup_score", -999),
+        reverse=True,
+    )[:40]
+
+    fixed = {
+        ticker: next((a for a in assets if a["ticker"] == ticker), None)
+        for ticker in ["XRPUSDT", "ADAUSDT", "ETHUSDT"]
+    }
+
+    return {
+        "generated_at": saida.get("generated_at"),
+        "meta": saida.get("meta", {}),
+        "universe_count": len(assets),
+        "top_overall": top_overall,
+        "candidates": candidates,
+        "fixed": fixed,
+        "errors": saida.get("errors", {}),
+    }
+
+
+
 def main():
     generated_at = datetime.now(timezone.utc).isoformat()
     stock_specs, stocks_catalog_ok, stock_catalog_count = selecionar_acoes()
@@ -942,8 +1088,8 @@ def main():
             "stock_intraday_target": min(MAX_STOCK_INTRADAY, len(stock_specs)),
             "etf_intraday_target": min(MAX_ETF_INTRADAY, len(etf_specs)),
             "stock_intraday_method": "1h fechado do Yahoo Finance; 4h artificial removido",
-            "score_model_version": "2.1-directional-multiframe",
-            "indicator_set_version": "3.1",
+            "score_model_version": "2.2-directional-multiframe-reversal-context",
+            "indicator_set_version": "3.2",
             "additional_indicators": [
                 "SMA50", "SMA200", "ADX14", "+DI14", "-DI14",
                 "Bollinger20x2", "CMF20", "Donchian20",
@@ -998,14 +1144,18 @@ def main():
                 if k not in {"recent_4h", "recent_1h", "recent_1d"}
             }
 
+    radar = construir_radar_compacto(saida)
+
     os.makedirs("data", exist_ok=True)
+    with open("data/radar.json", "w", encoding="utf-8") as arquivo:
+        json.dump(radar, arquivo, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     with open("data/summary.json", "w", encoding="utf-8") as arquivo:
         json.dump(resumo, arquivo, ensure_ascii=False, indent=2, allow_nan=False)
     with open("data/latest.json", "w", encoding="utf-8") as arquivo:
         json.dump(saida, arquivo, ensure_ascii=False, indent=2, allow_nan=False)
 
     print(json.dumps(saida["meta"], ensure_ascii=False, indent=2))
-    print("Arquivos data/summary.json e data/latest.json criados.")
+    print("Arquivos data/radar.json, data/summary.json e data/latest.json criados.")
 
 
 if __name__ == "__main__":
