@@ -278,6 +278,30 @@ def main():
 
     os.makedirs("data", exist_ok=True)
 
+    resumo = {
+        "generated_at": saida["generated_at"],
+        "cryptos": {},
+        "stocks": {},
+        "errors": saida["errors"],
+    }
+
+    for classe in ["cryptos", "stocks"]:
+        for ativo, dados in saida[classe].items():
+            resumo[classe][ativo] = {
+                "source": dados.get("source"),
+                "4h": dados.get("4h", [])[-1] if dados.get("4h") else None,
+                "1d": dados.get("1d", [])[-1] if dados.get("1d") else None,
+            }
+
+    with open("data/summary.json", "w", encoding="utf-8") as arquivo:
+        json.dump(
+            resumo,
+            arquivo,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        )
+
     with open("data/latest.json", "w", encoding="utf-8") as arquivo:
         json.dump(
             saida,
@@ -287,7 +311,7 @@ def main():
             allow_nan=False,
         )
 
-    print("Arquivo data/latest.json criado.")
+    print("Arquivos data/latest.json e data/summary.json criados.")
 
 
 if __name__ == "__main__":
