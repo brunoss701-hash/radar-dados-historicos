@@ -20,6 +20,14 @@ CRYPTOS = [
     "XRPUSDT",
 ]
 
+CRYPTO_YAHOO = {
+    "BTCUSDT": "BTC-USD",
+    "ETHUSDT": "ETH-USD",
+    "SOLUSDT": "SOL-USD",
+    "BNBUSDT": "BNB-USD",
+    "XRPUSDT": "XRP-USD",
+}
+
 STOCKS = [
     "AVGO",
     "NVDA",
@@ -236,8 +244,20 @@ def main():
                 "1d": preparar_json(binance(symbol, "1d")),
             }
 
-        except Exception as erro:
-            saida["errors"][symbol] = str(erro)
+        except Exception as erro_binance:
+            # GitHub Actions pode receber bloqueio geográfico (HTTP 451) da Binance.
+            # Nesse caso usamos Yahoo Finance como fonte alternativa.
+            try:
+                ticker_yahoo = CRYPTO_YAHOO[symbol]
+                saida["cryptos"][symbol] = {
+                    "source": "Yahoo Finance (fallback)",
+                    "4h": preparar_json(yahoo(ticker_yahoo, "4h")),
+                    "1d": preparar_json(yahoo(ticker_yahoo, "1d")),
+                }
+            except Exception as erro_yahoo:
+                saida["errors"][symbol] = (
+                    f"Binance: {erro_binance}; Yahoo fallback: {erro_yahoo}"
+                )
 
     # -------------------------
     # AÇÕES E ETFs
