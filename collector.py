@@ -154,6 +154,14 @@ def indicadores(df):
 
     df["volume_media20"] = df["volume"].rolling(20).mean()
     df["volume_ratio"] = df["volume"] / df["volume_media20"]
+    df["avg_dollar_volume20"] = (df["close"] * df["volume"]).rolling(20).mean()
+    df["gap_pct"] = (df["open"] / df["close"].shift(1) - 1) * 100
+    df["macd_hist_delta1"] = df["macd_hist"].diff()
+    df["rsi_delta1"] = df["rsi14"].diff()
+    df["cmf_delta1"] = df["cmf20"].diff()
+    df["bb_width_percentile120"] = df["bb_width_pct"].rolling(120).apply(
+        lambda x: 100.0 * (x <= x[-1]).mean(), raw=True
+    )
     return df
 
 
@@ -206,6 +214,12 @@ def snapshot(df):
         "donchian_high20_prev": safe_float(last.get("donchian_high20_prev")),
         "donchian_low20_prev": safe_float(last.get("donchian_low20_prev")),
         "volume_ratio": safe_float(last.get("volume_ratio")),
+        "avg_dollar_volume20": safe_float(last.get("avg_dollar_volume20")),
+        "gap_pct": safe_float(last.get("gap_pct")),
+        "macd_hist_delta1": safe_float(last.get("macd_hist_delta1")),
+        "rsi_delta1": safe_float(last.get("rsi_delta1")),
+        "cmf_delta1": safe_float(last.get("cmf_delta1")),
+        "bb_width_percentile120": safe_float(last.get("bb_width_percentile120")),
         "change_1bar_pct": pct_change(1),
         "change_5bar_pct": pct_change(5),
         "change_20bar_pct": pct_change(20),
@@ -214,6 +228,12 @@ def snapshot(df):
     }
     out["distance_high20_pct"] = round((close / high20 - 1) * 100, 4) if close and high20 else None
     out["distance_low20_pct"] = round((close / low20 - 1) * 100, 4) if close and low20 else None
+    e20 = out.get("ema20")
+    e50 = out.get("ema50")
+    s200 = out.get("sma200")
+    out["distance_ema20_pct"] = round((close / e20 - 1) * 100, 4) if close and e20 else None
+    out["distance_ema50_pct"] = round((close / e50 - 1) * 100, 4) if close and e50 else None
+    out["distance_sma200_pct"] = round((close / s200 - 1) * 100, 4) if close and s200 else None
 
     don_high = out.get("donchian_high20_prev")
     don_low = out.get("donchian_low20_prev")
@@ -242,68 +262,170 @@ def recent_bars(df, n=RECENT_BARS_TO_STORE):
     return out
 
 
-def prioridade(diario):
+def setup_scores(diario):
     if not diario:
-        return -999.0
-    score = 0.0
+        return {
+            "long_score": -999.0,
+            "short_score": -999.0,
+            "reversal_long_score": -999.0,
+            "reversal_short_score": -999.0,
+            "best_setup": "n/c",
+            "best_setup_score": -999.0,
+        }
+
     close = diario.get("close")
     e20 = diario.get("ema20")
     e50 = diario.get("ema50")
     e200 = diario.get("ema200")
+    s200 = diario.get("sma200")
     rsi = diario.get("rsi14")
     hist = diario.get("macd_hist")
+    hist_d = diario.get("macd_hist_delta1")
+    rsi_d = diario.get("rsi_delta1")
+    cmf = diario.get("cmf20")
+    cmf_d = diario.get("cmf_delta1")
+    adx = diario.get("adx14")
+    plus_di = diario.get("plus_di14")
+    minus_di = diario.get("minus_di14")
     vr = diario.get("volume_ratio")
-    ch5 = diario.get("change_5bar_pct")
+    breakout = diario.get("donchian_breakout20")
+    rel20 = diario.get("relative_strength_20bar_pct")
+    bb_b = diario.get("bb_percent_b")
+    bb_pctile = diario.get("bb_width_percentile120")
     dh = diario.get("distance_high20_pct")
     dl = diario.get("distance_low20_pct")
-    atrp = diario.get("atr_pct")
-    adx = diario.get("adx14")
-    cmf = diario.get("cmf20")
-    breakout = diario.get("donchian_breakout20")
-    bb_width = diario.get("bb_width_pct")
-    rel20 = diario.get("relative_strength_20bar_pct")
 
-    if all(v is not None for v in [close, e20, e50]):
-        if close > e20 > e50 or close < e20 < e50:
-            score += 2.0
-        else:
-            score += 0.5
-    if close is not None and e200 is not None:
-        score += 0.5
+    long_score = 0.0
+    short_score = 0.0
+    rev_long = 0.0
+    rev_short = 0.0
+
+    # Tendência: separa explicitamente direção de força.
+    if close is not None and e20 is not None:
+        long_score += 1.0 if close > e20 else 0.0
+        short_score += 1.0 if close < e20 else 0.0
+    if e20 is not None and e50 is not None:
+        long_score += 1.0 if e20 > e50 else 0.0
+        short_score += 1.0 if e20 < e50 else 0.0
+    if e50 is not None and e200 is not None:
+        long_score += 1.0 if e50 > e200 else 0.0
+        short_score += 1.0 if e50 < e200 else 0.0
+    if close is not None and s200 is not None:
+        long_score += 0.5 if close > s200 else 0.0
+        short_score += 0.5 if close < s200 else 0.0
+
+    # Momento: RSI extremo não é automaticamente reversão.
     if rsi is not None:
-        if rsi >= 65 or rsi <= 35:
-            score += 1.25
-        elif 40 <= rsi <= 60:
-            score += 0.25
-    if hist is not None and hist != 0:
-        score += 0.75
-    if vr is not None:
-        if vr >= 1.5:
-            score += 2.0
-        elif vr >= 1.2:
-            score += 1.0
-    if ch5 is not None:
-        score += min(abs(ch5) / 4.0, 2.0)
-    if dh is not None and dh >= -1.5:
-        score += 1.0
-    if dl is not None and dl <= 1.5:
-        score += 1.0
-    if atrp is not None and 1.0 <= atrp <= 8.0:
-        score += 0.5
-    if adx is not None:
-        if adx >= 25:
-            score += 1.0
-        elif adx >= 20:
-            score += 0.4
-    if cmf is not None and abs(cmf) >= 0.10:
-        score += 0.6
-    if breakout in {"up", "down"}:
-        score += 1.25
-    if bb_width is not None and bb_width >= 8:
-        score += 0.25
+        if 50 <= rsi <= 70:
+            long_score += 0.8
+        elif 40 <= rsi < 50:
+            long_score += 0.25
+        elif rsi > 78:
+            long_score -= 0.35
+
+        if 30 <= rsi <= 50:
+            short_score += 0.8
+        elif 50 < rsi <= 60:
+            short_score += 0.25
+        elif rsi < 22:
+            short_score -= 0.35
+
+        if rsi <= 30:
+            rev_long += 1.25
+            if rsi <= 24:
+                rev_long += 0.5
+        if rsi >= 70:
+            rev_short += 1.25
+            if rsi >= 76:
+                rev_short += 0.5
+
+    if hist is not None:
+        long_score += 0.8 if hist > 0 else 0.0
+        short_score += 0.8 if hist < 0 else 0.0
+    if hist_d is not None:
+        if hist_d > 0:
+            long_score += 0.25
+            rev_long += 0.7
+        elif hist_d < 0:
+            short_score += 0.25
+            rev_short += 0.7
+    if rsi_d is not None:
+        rev_long += 0.4 if rsi_d > 0 else 0.0
+        rev_short += 0.4 if rsi_d < 0 else 0.0
+
+    # Força de tendência e pressão compradora/vendedora.
+    if adx is not None and adx >= 25 and plus_di is not None and minus_di is not None:
+        if plus_di > minus_di:
+            long_score += 1.2
+        elif minus_di > plus_di:
+            short_score += 1.2
+    if cmf is not None:
+        long_score += 0.8 if cmf > 0.05 else 0.0
+        short_score += 0.8 if cmf < -0.05 else 0.0
+    if cmf_d is not None:
+        rev_long += 0.35 if cmf_d > 0 else 0.0
+        rev_short += 0.35 if cmf_d < 0 else 0.0
+
+    # Participação, rompimento e força relativa.
+    if vr is not None and vr >= 1.2:
+        long_score += 0.45
+        short_score += 0.45
+        rev_long += 0.25
+        rev_short += 0.25
+    if breakout == "up":
+        long_score += 1.5
+    elif breakout == "down":
+        short_score += 1.5
     if rel20 is not None:
-        score += min(abs(rel20) / 5.0, 1.0)
-    return round(score, 3)
+        if rel20 > 0:
+            long_score += min(rel20 / 8.0, 1.25)
+        elif rel20 < 0:
+            short_score += min(abs(rel20) / 8.0, 1.25)
+
+    # Posição nas Bandas de Bollinger e compressão.
+    if bb_b is not None:
+        if bb_b < 0.10:
+            rev_long += 0.6
+        elif bb_b > 0.90:
+            rev_short += 0.6
+    if bb_pctile is not None and bb_pctile <= 20:
+        # Squeeze: aumenta interesse no rompimento, mas não define direção.
+        long_score += 0.25
+        short_score += 0.25
+
+    # Proximidade de extremos recentes.
+    if dh is not None and -2.0 <= dh <= 0.5:
+        long_score += 0.35
+    if dl is not None and -0.5 <= dl <= 2.0:
+        short_score += 0.35
+
+    # Penaliza tentativa de reversão contra tendência muito forte sem melhora de momento.
+    if adx is not None and adx >= 40:
+        if rev_long > 0 and not (hist_d is not None and hist_d > 0):
+            rev_long -= 0.5
+        if rev_short > 0 and not (hist_d is not None and hist_d < 0):
+            rev_short -= 0.5
+
+    scores = {
+        "long": round(long_score, 3),
+        "short": round(short_score, 3),
+        "reversal_long": round(rev_long, 3),
+        "reversal_short": round(rev_short, 3),
+    }
+    best_setup = max(scores, key=scores.get)
+    return {
+        "long_score": scores["long"],
+        "short_score": scores["short"],
+        "reversal_long_score": scores["reversal_long"],
+        "reversal_short_score": scores["reversal_short"],
+        "best_setup": best_setup,
+        "best_setup_score": scores[best_setup],
+    }
+
+
+def prioridade(diario):
+    # Mantido por compatibilidade: agora é apenas a melhor nota DIRECIONAL.
+    return setup_scores(diario)["best_setup_score"]
 
 
 def obter_catalogo_quantfury(url, exchanges=None):
@@ -499,29 +621,18 @@ def remover_vela_incompleta_acoes(df, interval):
     return out
 
 
-def agregar_4h_sessao(df):
+def agregar_4h_continuo(df):
+    # Para cripto 24/7: agrega quatro barras de 1h sem usar lógica de sessão de bolsa.
     if df is None or df.empty:
         return pd.DataFrame()
-    df = df.sort_index().copy()
-    rows = []
-    index_dates = pd.Index([pd.Timestamp(x).date() for x in df.index])
-    for day in sorted(set(index_dates)):
-        day_df = df[index_dates == day]
-        for start in range(0, len(day_df), 4):
-            chunk = day_df.iloc[start:start + 4]
-            if len(chunk) < 4:
-                continue
-            rows.append({
-                "time": chunk.index[0],
-                "open": chunk["open"].iloc[0],
-                "high": chunk["high"].max(),
-                "low": chunk["low"].min(),
-                "close": chunk["close"].iloc[-1],
-                "volume": chunk["volume"].sum(),
-            })
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).set_index("time")
+    out = df.sort_index().resample("4h", origin="start_day").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    })
+    return out.dropna(subset=["open", "high", "low", "close"])
 
 
 def binance(symbol, interval):
@@ -573,7 +684,7 @@ def yahoo_crypto(symbol, interval):
         ticker, period="60d", interval="1h", progress=False, auto_adjust=False
     )
     h1 = remover_vela_incompleta_acoes(normalizar_yahoo(raw), "1h")
-    return agregar_4h_sessao(h1)
+    return agregar_4h_continuo(h1)
 
 
 def coletar_crypto(symbol):
@@ -612,7 +723,7 @@ def processar_specs(specs, intraday_limit):
     yahoo_to_spec = {x["yahoo"]: x for x in specs}
     tickers = list(yahoo_to_spec)
     diarios = batch_yahoo(tickers, period="2y", interval="1d")
-    daily_rank, dados, erros = [], {}, {}
+    dados, erros = {}, {}
 
     for yticker, spec in yahoo_to_spec.items():
         df = remover_vela_incompleta_acoes(diarios.get(yticker), "1d")
@@ -620,23 +731,59 @@ def processar_specs(specs, intraday_limit):
         if not snap:
             erros[spec["ticker"]] = "Yahoo Finance sem série diária válida."
             continue
-        score = prioridade(snap)
-        daily_rank.append((score, yticker))
+
+        scores = setup_scores(snap)
         dados[spec["ticker"]] = {
             "source": "Yahoo Finance",
             "exchange": spec["exchange"],
             "name": spec["name"],
             "yahoo_ticker": yticker,
             "quantfury_verified": spec["quantfury_verified"],
-            "priority_score": score,
+            "priority_score": scores["best_setup_score"],
+            **scores,
             "1d": snap,
             "recent_1d": recent_bars(df),
-            "4h": None,
-            "recent_4h": [],
+            "1h": None,
+            "recent_1h": [],
             "intraday_note": "n/c",
         }
 
-    top_yahoo = [yt for _, yt in sorted(daily_rank, reverse=True)[:intraday_limit]]
+    # Seleciona intraday de forma balanceada entre continuação long/short e reversões.
+    score_fields = [
+        "long_score", "short_score",
+        "reversal_long_score", "reversal_short_score"
+    ]
+    quota = max(1, intraday_limit // len(score_fields))
+    selected = []
+    for field in score_fields:
+        ranking = sorted(
+            [
+                (data.get(field, -999), data.get("yahoo_ticker"))
+                for data in dados.values()
+                if data.get("yahoo_ticker")
+            ],
+            reverse=True,
+        )
+        for _, yticker in ranking[:quota]:
+            if yticker not in selected:
+                selected.append(yticker)
+
+    if len(selected) < intraday_limit:
+        ranking_all = sorted(
+            [
+                (data.get("priority_score", -999), data.get("yahoo_ticker"))
+                for data in dados.values()
+                if data.get("yahoo_ticker")
+            ],
+            reverse=True,
+        )
+        for _, yticker in ranking_all:
+            if yticker not in selected:
+                selected.append(yticker)
+            if len(selected) >= intraday_limit:
+                break
+
+    top_yahoo = selected[:intraday_limit]
     horas = batch_yahoo(top_yahoo, period="60d", interval="1h")
 
     for yticker in top_yahoo:
@@ -645,14 +792,14 @@ def processar_specs(specs, intraday_limit):
         if key not in dados:
             continue
         h1 = remover_vela_incompleta_acoes(horas.get(yticker), "1h")
-        h4 = agregar_4h_sessao(h1)
-        snap4 = snapshot(h4)
-        if snap4:
-            dados[key]["4h"] = snap4
-            dados[key]["recent_4h"] = recent_bars(h4)
-            dados[key]["intraday_note"] = "4h aproximado, agregado de barras 1h por sessão"
+        snap1 = snapshot(h1)
+        if snap1:
+            dados[key]["1h"] = snap1
+            dados[key]["recent_1h"] = recent_bars(h1)
+            dados[key]["intraday_note"] = "1h fechado do Yahoo Finance; não é 4h artificial"
         else:
             dados[key]["intraday_note"] = "sem série intradiária válida"
+
     return dados, erros
 
 
@@ -700,10 +847,12 @@ def adicionar_forca_relativa(saida):
     aplicar(b3_stocks, saida.get("etfs", {}).get("BOVA11"))
     aplicar(saida.get("etfs", {}), saida.get("etfs", {}).get("SPY"))
 
-    # Recalcula a prioridade depois de incluir força relativa.
+    # Recalcula as quatro notas direcionais depois de incluir força relativa.
     for classe in ["cryptos", "stocks", "etfs"]:
         for dados in saida.get(classe, {}).values():
-            dados["priority_score"] = prioridade(dados.get("1d"))
+            scores = setup_scores(dados.get("1d"))
+            dados.update(scores)
+            dados["priority_score"] = scores["best_setup_score"]
 
 
 def main():
@@ -725,8 +874,9 @@ def main():
             "etfs_targeted": len(etf_specs),
             "stock_intraday_target": min(MAX_STOCK_INTRADAY, len(stock_specs)),
             "etf_intraday_target": min(MAX_ETF_INTRADAY, len(etf_specs)),
-            "stock_intraday_method": "4h aproximado agregado de barras Yahoo 1h por sessão",
-            "indicator_set_version": "3.0",
+            "stock_intraday_method": "1h fechado do Yahoo Finance; 4h artificial removido",
+            "score_model_version": "2.0-directional",
+            "indicator_set_version": "3.1",
             "additional_indicators": [
                 "SMA50", "SMA200", "ADX14", "+DI14", "-DI14",
                 "Bollinger20x2", "CMF20", "Donchian20",
@@ -743,7 +893,9 @@ def main():
         for future in as_completed(futures):
             symbol, data, error = future.result()
             if data:
-                data["priority_score"] = prioridade(data.get("1d"))
+                scores = setup_scores(data.get("1d"))
+                data.update(scores)
+                data["priority_score"] = scores["best_setup_score"]
                 saida["cryptos"][symbol] = data
             else:
                 saida["errors"][symbol] = error
@@ -759,9 +911,9 @@ def main():
     saida["meta"].update({
         "cryptos_collected": len(saida["cryptos"]),
         "stocks_collected": len(saida["stocks"]),
-        "stocks_with_4h": sum(1 for x in saida["stocks"].values() if x.get("4h")),
+        "stocks_with_1h": sum(1 for x in saida["stocks"].values() if x.get("1h")),
         "etfs_collected": len(saida["etfs"]),
-        "etfs_with_4h": sum(1 for x in saida["etfs"].values() if x.get("4h")),
+        "etfs_with_1h": sum(1 for x in saida["etfs"].values() if x.get("1h")),
         "errors_count": len(saida["errors"]),
     })
 
@@ -775,7 +927,7 @@ def main():
         for ticker, dados in saida[classe].items():
             resumo[classe][ticker] = {
                 k: v for k, v in dados.items()
-                if k not in {"recent_4h", "recent_1d"}
+                if k not in {"recent_4h", "recent_1h", "recent_1d"}
             }
 
     os.makedirs("data", exist_ok=True)
