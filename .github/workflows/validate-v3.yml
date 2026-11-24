@@ -32,7 +32,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Compilar modulos
-        run: python -m py_compile collector.py strategy_engine.py backtest.py
+        run: python -m py_compile collector.py strategy_engine.py backtest.py research_backtest.py
 
       - name: Rodar testes
         run: python -m unittest discover -s tests -p "test_*.py" -v
@@ -43,9 +43,14 @@ jobs:
       - name: Rodar holdout de validacao
         run: python backtest.py --universe-set validation --output artifacts/backtest_v3_validation.json --period 10y --max-hold 10 --slippage-bps 10
 
+      - name: Rodar pesquisa controlada
+        run: python research_backtest.py --output artifacts/research_v4.json --period 10y --max-hold 10 --slippage-bps 10
+
       - name: Publicar backtests
         uses: actions/upload-artifact@v4
         with:
           name: backtest-v3
-          path: artifacts/backtest_v3_*.json
+          path: |
+            artifacts/backtest_v3_*.json
+            artifacts/research_v4.json
           if-no-files-found: error
