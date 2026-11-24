@@ -29,7 +29,23 @@ class BacktestLogicTests(unittest.TestCase):
                 "max_drawdown_r": -5.0,
             },
         }
-        result = gate(all_metrics, oos_metrics)
+        breadth_all = {
+            "trend_breakout:long": {
+                "symbols_with_min_trades": 12, "positive_share": 0.67
+            },
+            "trend_breakout:short": {
+                "symbols_with_min_trades": 12, "positive_share": 0.67
+            },
+        }
+        breadth_oos = {
+            "trend_breakout:long": {
+                "symbols_with_min_trades": 10, "positive_share": 0.60
+            },
+            "trend_breakout:short": {
+                "symbols_with_min_trades": 10, "positive_share": 0.60
+            },
+        }
+        result = gate(all_metrics, oos_metrics, breadth_all, breadth_oos)
         self.assertEqual(result["trend_breakout:long"]["status"], "PASS_CANDIDATE")
         self.assertEqual(result["trend_breakout:short"]["status"], "FAIL_OR_INSUFFICIENT")
 
