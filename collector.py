@@ -10,6 +10,8 @@ import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 
+from strategy_engine import ENGINE_VERSION as STRATEGY_ENGINE_VERSION, evaluate_asset
+
 QUANTFURY_STOCKS_URL = "https://help.quantfury.com/en/articles/5448752-stocks"
 QUANTFURY_ETFS_URL = "https://help.quantfury.com/en/articles/5448760-etfs"
 
@@ -991,12 +993,23 @@ def aplicar_scores_multiframe(saida):
                 dados["priority_score"] = daily["best_setup_score"]
 
 
+def aplicar_setups_deterministicos(saida):
+    """Acopla o motor v3 sem substituir ainda o score legado."""
+    mapping = {"cryptos": "4h", "stocks": "1h", "etfs": "1h"}
+    for classe, intraday_key in mapping.items():
+        for dados in saida.get(classe, {}).values():
+            dados["deterministic_setups"] = evaluate_asset(
+                dados.get("1d"), dados.get(intraday_key)
+            )
+
+
 def construir_radar_compacto(saida):
-    # Arquivo pequeno para a automação: o coletor já fez a triagem do universo inteiro.
+    # Arquivo pequeno para a automação: resume o universo efetivamente processado.
     keep = [
-        "time", "close", "rsi14", "adx14", "plus_di14", "minus_di14",
-        "cmf20", "volume_ratio", "atr_pct", "macd_hist",
-        "macd_hist_delta1", "donchian_breakout20",
+        "time", "close", "ema20", "ema50", "ema200", "rsi14", "rsi_delta1",
+        "adx14", "plus_di14", "minus_di14", "cmf20", "volume_ratio",
+        "atr14", "atr_pct", "macd_hist", "macd_hist_delta1",
+        "donchian_breakout20", "distance_ema20_pct",
         "relative_strength_20bar_pct", "bb_percent_b",
         "change_5bar_pct", "change_20bar_pct",
     ]
@@ -1026,6 +1039,7 @@ def construir_radar_compacto(saida):
                 "daily_best": dados.get("daily_best_setup"),
                 "intraday_best": dados.get("intraday_best_setup"),
                 "intraday_tf": intraday_key if dados.get(intraday_key) else None,
+                "deterministic_setups": dados.get("deterministic_setups", []),
                 "d1": mini_snap(dados.get("1d")),
                 "intraday": mini_snap(dados.get(intraday_key)),
             })
@@ -1056,12 +1070,37 @@ def construir_radar_compacto(saida):
         for ticker in ["XRPUSDT", "ADAUSDT", "ETHUSDT"]
     }
 
+    state_rank = {
+        "TRIGGERED": 0,
+        "DAILY_TRIGGER_PENDING_INTRADAY": 1,
+        "DAILY_TRIGGER_NO_INTRADAY": 2,
+        "ARMED": 3,
+    }
+    deterministic_candidates = []
+    for asset in assets:
+        for setup in asset.get("deterministic_setups", []):
+            deterministic_candidates.append({
+                "ticker": asset["ticker"],
+                "class": asset["class"],
+                "exchange": asset.get("exchange"),
+                "verified": asset.get("verified"),
+                **setup,
+            })
+    deterministic_candidates.sort(
+        key=lambda x: (
+            state_rank.get(x.get("state"), 99),
+            0 if x.get("setup") == "trend_breakout" else 1,
+            x.get("ticker", ""),
+        )
+    )
+
     return {
         "generated_at": saida.get("generated_at"),
         "meta": saida.get("meta", {}),
         "universe_count": len(assets),
         "top_overall": top_overall,
         "candidates": candidates,
+        "deterministic_candidates": deterministic_candidates[:60],
         "fixed": fixed,
         "errors": saida.get("errors", {}),
     }
@@ -1089,6 +1128,8 @@ def main():
             "etf_intraday_target": min(MAX_ETF_INTRADAY, len(etf_specs)),
             "stock_intraday_method": "1h fechado do Yahoo Finance; 4h artificial removido",
             "score_model_version": "2.2-directional-multiframe-reversal-context",
+            "strategy_engine_version": STRATEGY_ENGINE_VERSION,
+            "strategy_engine_status": "experimental_backtest_required",
             "indicator_set_version": "3.2",
             "additional_indicators": [
                 "SMA50", "SMA200", "ADX14", "+DI14", "-DI14",
@@ -1119,6 +1160,7 @@ def main():
     saida["etfs"] = etfs
     adicionar_forca_relativa(saida)
     aplicar_scores_multiframe(saida)
+    aplicar_setups_deterministicos(saida)
     saida["errors"].update(stock_errors)
     saida["errors"].update({f"ETF:{k}": v for k, v in etf_errors.items()})
 
