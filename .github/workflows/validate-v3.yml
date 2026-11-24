@@ -1,0 +1,48 @@
+name: Validar Radar v3
+
+on:
+  push:
+    branches:
+      - radar-v3-deterministic
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Baixar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar bibliotecas
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compilar modulos
+        run: python -m py_compile collector.py strategy_engine.py backtest.py
+
+      - name: Rodar testes
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Rodar backtest experimental
+        run: python backtest.py --output artifacts/backtest_v3.json --period 5y --max-hold 10 --slippage-bps 5
+
+      - name: Publicar backtest
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-v3
+          path: artifacts/backtest_v3.json
+          if-no-files-found: error
