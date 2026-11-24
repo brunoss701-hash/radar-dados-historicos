@@ -58,9 +58,9 @@ FBTC FXI GBTC GDX GLD ILF INDA IWM IXN IYW JEPI LIT METV OIH PPLT ROBO SCHD SLV 
 UNG URA URNM USO UUP VBR VGK VNQ VT XLB XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY XME
 """.split()
 
-MAX_US_STOCKS = 180
-MAX_B3_STOCKS = 35
-MAX_STOCK_INTRADAY = 70
+MAX_US_STOCKS = 400
+MAX_B3_STOCKS = 60
+MAX_STOCK_INTRADAY = 100
 MAX_ETF_INTRADAY = 30
 RECENT_BARS_TO_STORE = 12
 
@@ -470,6 +470,11 @@ def obter_catalogo_quantfury(url, exchanges=None):
 
 
 def selecionar_acoes():
+    """Seleciona um universo amplo, mas controlado, do catálogo Quantfury.
+
+    Mantém a lista preferida na frente e completa automaticamente com outros
+    tickers verificados. O intraday continua limitado aos melhores candidatos.
+    """
     catalog_ok = True
     try:
         catalog = obter_catalogo_quantfury(
@@ -481,6 +486,25 @@ def selecionar_acoes():
 
     oficiais = {(x["exchange"], x["ticker"]): x for x in catalog}
     selecionadas = []
+    vistos = set()
+
+    def adicionar(item):
+        if not item:
+            return False
+        key = (item["exchange"], item["ticker"])
+        if key in vistos:
+            return False
+        ticker = item["ticker"]
+        yahoo = f"{ticker}.SA" if item["exchange"] == "B3" else ticker.replace(".", "-")
+        selecionadas.append({
+            "ticker": ticker,
+            "yahoo": yahoo,
+            "exchange": item["exchange"],
+            "name": item["name"],
+            "quantfury_verified": True,
+        })
+        vistos.add(key)
+        return True
 
     for ticker in PREFERRED_US_STOCKS:
         matches = [
@@ -488,29 +512,36 @@ def selecionar_acoes():
             if tk == ticker and exchange in {"NASDAQ", "NYSE"}
         ]
         if matches:
-            item = matches[0]
-            selecionadas.append({
-                "ticker": ticker,
-                "yahoo": ticker.replace(".", "-"),
-                "exchange": item["exchange"],
-                "name": item["name"],
-                "quantfury_verified": True,
-            })
+            adicionar(matches[0])
         if sum(1 for x in selecionadas if x["exchange"] in {"NASDAQ", "NYSE"}) >= MAX_US_STOCKS:
             break
 
+    us_count = sum(1 for x in selecionadas if x["exchange"] in {"NASDAQ", "NYSE"})
+    if us_count < MAX_US_STOCKS:
+        for item in catalog:
+            if item["exchange"] not in {"NASDAQ", "NYSE"}:
+                continue
+            adicionar(item)
+            us_count = sum(
+                1 for x in selecionadas if x["exchange"] in {"NASDAQ", "NYSE"}
+            )
+            if us_count >= MAX_US_STOCKS:
+                break
+
     for ticker in PREFERRED_B3_STOCKS:
-        item = oficiais.get(("B3", ticker))
-        if item:
-            selecionadas.append({
-                "ticker": ticker,
-                "yahoo": f"{ticker}.SA",
-                "exchange": "B3",
-                "name": item["name"],
-                "quantfury_verified": True,
-            })
+        adicionar(oficiais.get(("B3", ticker)))
         if sum(1 for x in selecionadas if x["exchange"] == "B3") >= MAX_B3_STOCKS:
             break
+
+    b3_count = sum(1 for x in selecionadas if x["exchange"] == "B3")
+    if b3_count < MAX_B3_STOCKS:
+        for item in catalog:
+            if item["exchange"] != "B3":
+                continue
+            adicionar(item)
+            b3_count = sum(1 for x in selecionadas if x["exchange"] == "B3")
+            if b3_count >= MAX_B3_STOCKS:
+                break
 
     if not selecionadas:
         fallback = [
