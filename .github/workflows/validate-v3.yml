@@ -37,12 +37,15 @@ jobs:
       - name: Rodar testes
         run: python -m unittest discover -s tests -p "test_*.py" -v
 
-      - name: Rodar backtest experimental
-        run: python backtest.py --output artifacts/backtest_v3.json --period 10y --max-hold 10 --slippage-bps 10
+      - name: Rodar backtest de desenvolvimento
+        run: python backtest.py --universe-set development --output artifacts/backtest_v3_development.json --period 10y --max-hold 10 --slippage-bps 10
 
-      - name: Publicar backtest
+      - name: Rodar holdout de validacao
+        run: python backtest.py --universe-set validation --output artifacts/backtest_v3_validation.json --period 10y --max-hold 10 --slippage-bps 10
+
+      - name: Publicar backtests
         uses: actions/upload-artifact@v4
         with:
           name: backtest-v3
-          path: artifacts/backtest_v3.json
+          path: artifacts/backtest_v3_*.json
           if-no-files-found: error
