@@ -21,7 +21,7 @@ import collector
 from strategy_engine import ENGINE_VERSION, evaluate_daily
 
 
-UNIVERSE = [
+DEVELOPMENT_UNIVERSE = [
     # Tecnologia / comunicacao
     "AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "TSLA", "GOOGL",
     "NFLX", "AVGO", "ORCL", "CRM", "QCOM",
@@ -38,6 +38,18 @@ UNIVERSE = [
     # Cripto
     "BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "ADA-USD", "DOGE-USD",
     "LINK-USD", "LTC-USD",
+]
+
+# Holdout transversal: ativos diferentes dos usados acima. As regras NÃO são
+# recalibradas com este conjunto; ele serve para testar generalização em ações.
+VALIDATION_UNIVERSE = [
+    "ADBE", "INTC", "MU", "AMAT", "PLTR", "PANW", "PYPL", "V", "MA", "AXP",
+    "WFC", "BLK", "SLB", "OXY", "MPC", "VLO", "TGT", "SBUX", "NKE", "LOW",
+    "TJX", "MRK", "ABBV", "TMO", "AMGN", "GILD", "RTX", "LMT", "NOC", "HON",
+    "ETN", "FDX", "UNP", "CSX", "MAR", "HLT", "IBM", "ACN", "ADP", "ASML",
+    "ABEV3.SA", "B3SA3.SA", "BBSE3.SA", "BPAC11.SA", "CMIG4.SA",
+    "GGBR4.SA", "RAIL3.SA", "RENT3.SA", "SUZB3.SA", "TOTS3.SA",
+    "VIVT3.SA", "PRIO3.SA",
 ]
 
 ETF_SYMBOLS = {
@@ -275,10 +287,45 @@ def grouped_report(trades, sample=None):
     return out
 
 
-def gate(all_metrics, oos_metrics):
-    """Gate de robustez: exige consistência no histórico total E fora da amostra.
+def breadth_report(trades, sample=None, min_trades_per_symbol=3):
+    base = [t for t in trades if sample is None or t["sample"] == sample]
+    keys = sorted({(t["setup"], t["direction"]) for t in base})
+    out = {}
+    for setup, direction in keys:
+        relevant = [
+            t for t in base if t["setup"] == setup and t["direction"] == direction
+        ]
+        per_symbol = {}
+        for symbol in sorted({t["symbol"] for t in relevant}):
+            m = metrics([t for t in relevant if t["symbol"] == symbol])
+            if m["trades"] >= min_trades_per_symbol:
+                per_symbol[symbol] = m
+        avgs = [m["avg_r"] for m in per_symbol.values() if m["avg_r"] is not None]
+        positive = [x for x in avgs if x > 0]
+        avgs_sorted = sorted(avgs)
+        median = None
+        if avgs_sorted:
+            mid = len(avgs_sorted) // 2
+            median = (
+                avgs_sorted[mid]
+                if len(avgs_sorted) % 2
+                else (avgs_sorted[mid - 1] + avgs_sorted[mid]) / 2
+            )
+        out[f"{setup}:{direction}"] = {
+            "symbols_with_min_trades": len(per_symbol),
+            "positive_symbols": len(positive),
+            "positive_share": round(len(positive) / len(avgs), 4) if avgs else None,
+            "median_symbol_avg_r": round(median, 4) if median is not None else None,
+        }
+    return out
 
-    Não promove automaticamente para dinheiro real.
+
+def gate(all_metrics, oos_metrics, breadth_all, breadth_oos):
+    """Gate de robustez: consistência temporal + dispersão entre ativos.
+
+    Max drawdown em R continua reportado como diagnóstico, mas não entra no gate
+    agregado porque trades de vários ativos podem se sobrepor e isso não equivale
+    a uma curva de capital de portfólio.
     """
     decisions = {}
     keys = sorted(set(all_metrics) | set(oos_metrics))
@@ -287,6 +334,8 @@ def gate(all_metrics, oos_metrics):
             continue
         full = all_metrics.get(key, {})
         oos = oos_metrics.get(key, {})
+        bfull = breadth_all.get(key, {})
+        boos = breadth_oos.get(key, {})
         passed = (
             full.get("trades", 0) >= 60
             and oos.get("trades", 0) >= 25
@@ -294,14 +343,17 @@ def gate(all_metrics, oos_metrics):
             and oos.get("avg_r") is not None and oos["avg_r"] > 0
             and full.get("profit_factor") is not None and full["profit_factor"] >= 1.15
             and oos.get("profit_factor") is not None and oos["profit_factor"] >= 1.15
-            and full.get("max_drawdown_r", -999) >= -15.0
-            and oos.get("max_drawdown_r", -999) >= -10.0
+            and bfull.get("symbols_with_min_trades", 0) >= 10
+            and boos.get("symbols_with_min_trades", 0) >= 10
+            and bfull.get("positive_share") is not None and bfull["positive_share"] >= 0.50
+            and boos.get("positive_share") is not None and boos["positive_share"] >= 0.50
         )
         decisions[key] = {
             "status": "PASS_CANDIDATE" if passed else "FAIL_OR_INSUFFICIENT",
             "criteria": (
-                "FULL trades>=60, avg_r>0, PF>=1.15, maxDD>=-15R; "
-                "OOS trades>=25, avg_r>0, PF>=1.15, maxDD>=-10R"
+                "FULL trades>=60, avg_r>0, PF>=1.15; OOS trades>=25, "
+                "avg_r>0, PF>=1.15; >=10 ativos avaliaveis e >=50% positivos "
+                "em FULL e OOS"
             ),
         }
     return decisions
@@ -310,15 +362,23 @@ def gate(all_metrics, oos_metrics):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="data/backtest_v3.json")
+    parser.add_argument(
+        "--universe-set", choices=["development", "validation"], default="development"
+    )
     parser.add_argument("--period", default="5y")
     parser.add_argument("--max-hold", type=int, default=10)
     parser.add_argument("--slippage-bps", type=float, default=5.0)
     args = parser.parse_args()
 
-    downloaded = collector.batch_yahoo(UNIVERSE, period=args.period, interval="1d")
+    universe = (
+        VALIDATION_UNIVERSE
+        if args.universe_set == "validation"
+        else DEVELOPMENT_UNIVERSE
+    )
+    downloaded = collector.batch_yahoo(universe, period=args.period, interval="1d")
     all_trades = []
     errors = {}
-    for symbol in UNIVERSE:
+    for symbol in universe:
         raw = downloaded.get(symbol)
         if raw is None or raw.empty:
             errors[symbol] = "sem dados"
@@ -333,6 +393,8 @@ def main():
 
     all_metrics = grouped_report(all_trades)
     oos = grouped_report(all_trades, sample="OOS")
+    breadth_all = breadth_report(all_trades)
+    breadth_oos = breadth_report(all_trades, sample="OOS")
     by_class = {}
     for cls in sorted({t["asset_class"] for t in all_trades}):
         subset = [t for t in all_trades if t["asset_class"] == cls]
@@ -353,13 +415,16 @@ def main():
             "slippage_bps_each_side": args.slippage_bps,
             "overlap": "uma posicao por ativo de cada vez",
         },
-        "universe_requested": UNIVERSE,
+        "universe_set": args.universe_set,
+        "universe_requested": universe,
         "universe_downloaded": sorted(downloaded.keys()),
         "errors": errors,
         "metrics_all": all_metrics,
         "metrics_oos": oos,
         "metrics_by_asset_class": by_class,
-        "gate_robustness": gate(all_metrics, oos),
+        "breadth_all": breadth_all,
+        "breadth_oos": breadth_oos,
+        "gate_robustness": gate(all_metrics, oos, breadth_all, breadth_oos),
         "trades_count": len(all_trades),
         "warning": (
             "Backtest experimental. Um PASS_CANDIDATE exige validacao adicional "
