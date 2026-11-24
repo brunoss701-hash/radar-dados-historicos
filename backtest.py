@@ -22,11 +22,28 @@ from strategy_engine import ENGINE_VERSION, evaluate_daily
 
 
 UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "TSLA",
-    "JPM", "XOM", "WMT", "SPY", "QQQ", "IWM", "GLD",
-    "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BOVA11.SA",
-    "BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD",
+    # Tecnologia / comunicacao
+    "AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "TSLA", "GOOGL",
+    "NFLX", "AVGO", "ORCL", "CRM", "QCOM",
+    # Financeiro / energia / consumo / saude / industrial / materiais
+    "JPM", "BAC", "GS", "XOM", "CVX", "COP", "WMT", "COST", "HD", "MCD",
+    "LLY", "JNJ", "UNH", "CAT", "DE", "BA", "DIS", "KO", "PEP", "NEE",
+    "FCX", "UPS", "BKNG",
+    # ETFs multi-fator e setoriais
+    "SPY", "QQQ", "IWM", "DIA", "SMH", "XLF", "XLE", "XLI", "XLV", "XLY",
+    "GLD", "TLT",
+    # B3
+    "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "WEGE3.SA",
+    "BBAS3.SA", "BOVA11.SA",
+    # Cripto
+    "BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "ADA-USD", "DOGE-USD",
+    "LINK-USD", "LTC-USD",
 ]
+
+ETF_SYMBOLS = {
+    "SPY", "QQQ", "IWM", "DIA", "SMH", "XLF", "XLE", "XLI", "XLV", "XLY",
+    "GLD", "TLT", "BOVA11.SA",
+}
 
 SETUP_PRIORITY = {"trend_breakout": 0, "trend_pullback": 1}
 
@@ -163,6 +180,16 @@ def simulate_trade(ind, signal_i, setup, max_hold=10, slippage_bps=5.0):
     }
 
 
+def asset_class(symbol):
+    if symbol.endswith("-USD"):
+        return "crypto"
+    if symbol.endswith(".SA"):
+        return "b3_etf" if symbol in ETF_SYMBOLS else "b3_stock"
+    if symbol in ETF_SYMBOLS:
+        return "us_etf"
+    return "us_stock"
+
+
 def backtest_symbol(symbol, raw, split_ratio=0.70, max_hold=10, slippage_bps=5.0):
     if raw is None or raw.empty or len(raw) < 260:
         return []
@@ -190,6 +217,7 @@ def backtest_symbol(symbol, raw, split_ratio=0.70, max_hold=10, slippage_bps=5.0
 
         trade.update({
             "symbol": symbol,
+            "asset_class": asset_class(symbol),
             "signal_time": ind.index[i].isoformat(),
             "setup": setup["setup"],
             "direction": setup["direction"],
@@ -247,25 +275,34 @@ def grouped_report(trades, sample=None):
     return out
 
 
-def gate(oos_metrics):
-    """Gate mínimo para considerar um setup candidato a estudos adicionais.
+def gate(all_metrics, oos_metrics):
+    """Gate de robustez: exige consistência no histórico total E fora da amostra.
 
     Não promove automaticamente para dinheiro real.
     """
     decisions = {}
-    for key, m in oos_metrics.items():
+    keys = sorted(set(all_metrics) | set(oos_metrics))
+    for key in keys:
         if key == "ALL":
             continue
-        pf = m.get("profit_factor")
+        full = all_metrics.get(key, {})
+        oos = oos_metrics.get(key, {})
         passed = (
-            m.get("trades", 0) >= 20
-            and m.get("avg_r") is not None and m["avg_r"] > 0
-            and pf is not None and pf >= 1.15
-            and m.get("max_drawdown_r", -999) >= -12.0
+            full.get("trades", 0) >= 60
+            and oos.get("trades", 0) >= 25
+            and full.get("avg_r") is not None and full["avg_r"] > 0
+            and oos.get("avg_r") is not None and oos["avg_r"] > 0
+            and full.get("profit_factor") is not None and full["profit_factor"] >= 1.15
+            and oos.get("profit_factor") is not None and oos["profit_factor"] >= 1.15
+            and full.get("max_drawdown_r", -999) >= -15.0
+            and oos.get("max_drawdown_r", -999) >= -10.0
         )
         decisions[key] = {
             "status": "PASS_CANDIDATE" if passed else "FAIL_OR_INSUFFICIENT",
-            "criteria": "OOS trades>=20; avg_r>0; PF>=1.15; maxDD>=-12R",
+            "criteria": (
+                "FULL trades>=60, avg_r>0, PF>=1.15, maxDD>=-15R; "
+                "OOS trades>=25, avg_r>0, PF>=1.15, maxDD>=-10R"
+            ),
         }
     return decisions
 
@@ -294,7 +331,16 @@ def main():
         except Exception as exc:
             errors[symbol] = str(exc)
 
+    all_metrics = grouped_report(all_trades)
     oos = grouped_report(all_trades, sample="OOS")
+    by_class = {}
+    for cls in sorted({t["asset_class"] for t in all_trades}):
+        subset = [t for t in all_trades if t["asset_class"] == cls]
+        by_class[cls] = {
+            "ALL": grouped_report(subset),
+            "OOS": grouped_report([t for t in subset if t["sample"] == "OOS"]),
+        }
+
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "engine_version": ENGINE_VERSION,
@@ -310,9 +356,10 @@ def main():
         "universe_requested": UNIVERSE,
         "universe_downloaded": sorted(downloaded.keys()),
         "errors": errors,
-        "metrics_all": grouped_report(all_trades),
+        "metrics_all": all_metrics,
         "metrics_oos": oos,
-        "gate_oos": gate(oos),
+        "metrics_by_asset_class": by_class,
+        "gate_robustness": gate(all_metrics, oos),
         "trades_count": len(all_trades),
         "warning": (
             "Backtest experimental. Um PASS_CANDIDATE exige validacao adicional "
