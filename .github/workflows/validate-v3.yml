@@ -38,7 +38,7 @@ jobs:
         run: python -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Rodar backtest experimental
-        run: python backtest.py --output artifacts/backtest_v3.json --period 5y --max-hold 10 --slippage-bps 5
+        run: python backtest.py --output artifacts/backtest_v3.json --period 10y --max-hold 10 --slippage-bps 10
 
       - name: Publicar backtest
         uses: actions/upload-artifact@v4
