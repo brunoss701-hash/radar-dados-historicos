@@ -1,0 +1,76 @@
+name: Smoke cobertura ampliada
+
+on:
+  push:
+    branches:
+      - radar-v3-deterministic
+    paths:
+      - "collector.py"
+      - ".github/workflows/smoke-expanded-universe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Baixar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Rodar coletor ampliado
+        run: |
+          START=$(date +%s)
+          python collector.py
+          END=$(date +%s)
+          echo "collector_runtime_seconds=$((END-START))" >> "$GITHUB_ENV"
+
+      - name: Validar cobertura e erros
+        run: |
+          python - <<'PY'
+          import json
+          with open("data/radar.json", encoding="utf-8") as f:
+              r = json.load(f)
+          m = r["meta"]
+          stocks = int(m.get("stocks_collected", 0))
+          targeted = int(m.get("stocks_targeted", 0))
+          errors = int(m.get("errors_count", 0))
+          intraday = int(m.get("stocks_with_1h", 0))
+          print({
+              "stocks_targeted": targeted,
+              "stocks_collected": stocks,
+              "stocks_with_1h": intraday,
+              "crypto_collected": m.get("cryptos_collected"),
+              "errors_count": errors,
+              "universe_count": r.get("universe_count"),
+          })
+          if targeted < 400:
+              raise SystemExit("Cobertura alvo ficou abaixo de 400 ações.")
+          if stocks < max(350, int(targeted * 0.85)):
+              raise SystemExit("Muitas ações falharam no diário.")
+          if intraday < 75:
+              raise SystemExit("Cobertura intraday insuficiente.")
+          if errors > max(25, int(targeted * 0.08)):
+              raise SystemExit("Taxa de erros excessiva.")
+          PY
+          echo "Runtime: ${collector_runtime_seconds}s"
+
+      - name: Publicar radar de teste
+        uses: actions/upload-artifact@v4
+        with:
+          name: expanded-universe-smoke
+          path: data/radar.json
+          if-no-files-found: error
